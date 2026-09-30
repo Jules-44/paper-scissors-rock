@@ -8,7 +8,6 @@ import { ShowdownPhase } from './components/ShowdownPhase';
 import { VictoryPhase } from './components/VictoryPhase';
 import { RoomNetwork } from './utils/network';
 import { GAMES, WIN_CONDITIONS, generateMatchupQueue } from './utils/gameEngine';
-import { sound } from './utils/sound';
 
 function generateRandomCode() {
   const words = ['ROCK', 'HUDDLE', 'CLASH', 'DUEL', 'SPLIT', 'TEAM'];
@@ -28,24 +27,52 @@ function getStoredPlayerId() {
 
 export default function App() {
   // Check URL query for room code
-  const [roomCode, setRoomCode] = useState(() => {
+  const [roomCode] = useState(() => {
     if (typeof window !== 'undefined') {
       const params = new URLSearchParams(window.location.search);
       const r = params.get('room');
-      if (r) return r.toUpperCase();
+      if (r) return r.toUpperCase().trim();
     }
-    return generateRandomCode();
-  });
-
-  const [isHost, setIsHost] = useState(() => {
-    if (typeof window !== 'undefined') {
-      const params = new URLSearchParams(window.location.search);
-      return !params.has('room'); // First visitor without ?room is host
-    }
-    return true;
+    const newCode = generateRandomCode();
+    sessionStorage.setItem('huddle_is_creator_' + newCode, 'true');
+    return newCode;
   });
 
   const [myPlayerId] = useState(getStoredPlayerId);
+
+  // Determine if this tab is the host (creator or claimed)
+  const [isHost, setIsHost] = useState(() => {
+    if (typeof window !== 'undefined') {
+      // Check if session storage has this room's creator flag
+      if (sessionStorage.getItem('huddle_is_creator_' + roomCode) === 'true') {
+        return true;
+      }
+      const params = new URLSearchParams(window.location.search);
+      if (!params.has('room')) {
+        return true;
+      }
+    }
+    return false;
+  });
+
+  // Stored player profile (optimistic local state)
+  const [myPlayer, setMyPlayer] = useState(() => {
+    if (typeof window !== 'undefined') {
+      const storedName = sessionStorage.getItem('huddle_player_name');
+      const storedTeam = sessionStorage.getItem('huddle_player_team');
+      if (storedName) {
+        return {
+          id: myPlayerId,
+          name: storedName,
+          team: storedTeam || 'teamA',
+          isHost,
+          isBot: false,
+        };
+      }
+    }
+    return null;
+  });
+
   const [showQr, setShowQr] = useState(false);
   const [connectedPeersCount, setConnectedPeersCount] = useState(0);
 
@@ -65,34 +92,43 @@ export default function App() {
     currentMatchupIndex: 0,
     history: [],
     winnerTeam: null,
+    clinchedWinner: null,
   });
 
   const networkRef = useRef(null);
+  const gameStateRef = useRef(gameState);
+  gameStateRef.current = gameState;
 
-  // Keep state synced to clients if we are host
-  const broadcastLatestState = useCallback((stateToBroadcast) => {
-    if (networkRef.current && isHost) {
-      networkRef.current.broadcastState(stateToBroadcast);
+  const isHostRef = useRef(isHost);
+  isHostRef.current = isHost;
+
+  const myPlayerRef = useRef(myPlayer);
+  myPlayerRef.current = myPlayer;
+
+  // Broadcast latest state to peers (host only)
+  const broadcastState = useCallback((stateToBroadcast) => {
+    if (networkRef.current && isHostRef.current) {
+      networkRef.current.broadcastGameState(stateToBroadcast);
     }
-  }, [isHost]);
+  }, []);
 
-  // Host Action Handler (receives actions from clients or local UI)
-  const handleHostAction = useCallback((action) => {
+  // Central state reducer for all game actions
+  const applyAction = useCallback((action) => {
     setGameState((prev) => {
       let next = { ...prev };
 
       if (action.type === 'JOIN_PLAYER') {
-        const existingIdx = next.players.findIndex(p => p.id === action.player.id);
-        if (existingIdx >= 0) {
-          next.players = [...next.players];
-          next.players[existingIdx] = { ...next.players[existingIdx], ...action.player };
+        const player = action.player;
+        const exists = next.players.some(p => p.id === player.id);
+        if (exists) {
+          next.players = next.players.map(p => (p.id === player.id ? { ...p, ...player } : p));
         } else {
-          next.players = [...next.players, action.player];
+          next.players = [...next.players, player];
         }
-      } 
+      }
       else if (action.type === 'UPDATE_SETTINGS') {
         next.settings = { ...next.settings, ...action.settings };
-      } 
+      }
       else if (action.type === 'ADD_BOT') {
         const botCount = next.players.filter(p => p.isBot).length + 1;
         const botNames = ['Pixel', 'Turbo', 'Blaze', 'Nova', 'Echo', 'Viper'];
@@ -118,8 +154,9 @@ export default function App() {
         next.scores = { teamA: 0, teamB: 0 };
         next.history = [];
         next.winnerTeam = null;
+        next.clinchedWinner = null;
 
-        // Auto-assign random choices for bots
+        // Auto-assign moves for bots
         const game = GAMES[next.settings.gameId] || GAMES.psr;
         next.players.forEach(p => {
           if (p.isBot) {
@@ -130,15 +167,8 @@ export default function App() {
       }
       else if (action.type === 'SELECT_MOVE') {
         next.moves = { ...next.moves, [action.playerId]: action.move };
-
-        // Check if all players have picked
-        const allPicked = next.players.every(p => !!next.moves[p.id]);
-        if (allPicked && next.phase === 'picking') {
-          // Can auto proceed or wait for host click
-        }
       }
       else if (action.type === 'FORCE_SHUFFLE') {
-        // Ensure any player without a move gets an auto pick so game proceeds
         const game = GAMES[next.settings.gameId] || GAMES.psr;
         const updatedMoves = { ...next.moves };
         next.players.forEach(p => {
@@ -153,7 +183,7 @@ export default function App() {
       else if (action.type === 'MATCHUP_RESULT') {
         const result = action.result; // 'teamA' | 'teamB' | 'draw'
         const currentMatchup = next.matchups[next.currentMatchupIndex];
-        
+
         let newScores = { ...next.scores };
         if (result === 'teamA') newScores.teamA += 1;
         if (result === 'teamB') newScores.teamB += 1;
@@ -171,7 +201,6 @@ export default function App() {
           ];
         }
 
-        // Check win condition
         const cond = WIN_CONDITIONS.find(c => c.id === next.settings.winConditionId);
         const target = cond ? cond.targetWins : 2;
 
@@ -189,7 +218,6 @@ export default function App() {
         if (nextIdx < next.matchups.length) {
           next.currentMatchupIndex = nextIdx;
         } else {
-          // If we reached the end of queue without a winner, add extra sudden-death matchup
           const teamA = next.players.filter(p => p.team === 'teamA');
           const teamB = next.players.filter(p => p.team === 'teamB');
           const extraMatchup = {
@@ -212,13 +240,11 @@ export default function App() {
         } else if (next.scores.teamB > next.scores.teamA) {
           next.winnerTeam = 'teamB';
         } else {
-          // Tie-break flip
           next.winnerTeam = Math.random() > 0.5 ? 'teamA' : 'teamB';
         }
         next.phase = 'victory';
       }
       else if (action.type === 'REMATCH') {
-        // Restart game with current teams
         const teamA = next.players.filter(p => p.team === 'teamA');
         const teamB = next.players.filter(p => p.team === 'teamB');
         const queue = generateMatchupQueue(teamA, teamB, next.settings.winConditionId);
@@ -230,6 +256,7 @@ export default function App() {
         next.scores = { teamA: 0, teamB: 0 };
         next.history = [];
         next.winnerTeam = null;
+        next.clinchedWinner = null;
 
         const game = GAMES[next.settings.gameId] || GAMES.psr;
         next.players.forEach(p => {
@@ -244,118 +271,144 @@ export default function App() {
         next.moves = {};
         next.scores = { teamA: 0, teamB: 0 };
         next.winnerTeam = null;
+        next.clinchedWinner = null;
       }
 
-      broadcastLatestState(next);
+      // If we are host, broadcast updated state to network
+      if (isHostRef.current) {
+        broadcastState(next);
+      }
+
       return next;
     });
-  }, [broadcastLatestState]);
+  }, [broadcastState]);
 
-  // Client / Host Action Dispatcher
-  const dispatchAction = (action) => {
-    if (isHost) {
-      handleHostAction(action);
-    } else if (networkRef.current) {
-      networkRef.current.sendActionToHost(action);
+  // Dispatch an action (applies locally & broadcasts to network)
+  const dispatch = useCallback((action) => {
+    applyAction(action);
+    if (networkRef.current) {
+      networkRef.current.broadcastAction(action);
     }
-  };
+  }, [applyAction]);
 
-  // Initialize Network Connection
+  // Initialize network and listeners
   useEffect(() => {
-    // Ensure URL has ?room=... for easy sharing
+    // Keep URL parameter synchronized
     if (typeof window !== 'undefined' && !window.location.search.includes(`room=${roomCode}`)) {
       window.history.replaceState(null, '', `?room=${roomCode}`);
     }
 
     const net = new RoomNetwork({
       roomCode,
-      isHost,
+      myPlayerId,
       onStateReceived: (remoteState) => {
-        setGameState(remoteState);
-      },
-      onPlayerJoined: (action, senderId) => {
-        handleHostAction(action);
-      },
-      onPlayerLeft: () => {
-        // Player disconnected
-      },
-      onConnected: () => {
-        // If client joins, register self if we have a name stored
-        const storedName = sessionStorage.getItem('huddle_player_name');
-        const storedTeam = sessionStorage.getItem('huddle_player_team') || 'teamA';
-        if (storedName) {
-          dispatchAction({
-            type: 'JOIN_PLAYER',
-            player: {
-              id: myPlayerId,
-              name: storedName,
-              team: storedTeam,
-              isHost,
-              isBot: false,
-            }
-          });
+        // If we receive state from a host, adopt it
+        if (!isHostRef.current && remoteState) {
+          setGameState(remoteState);
         }
       },
-      onError: (msg) => {
-        console.warn('Network alert:', msg);
+      onActionReceived: (action) => {
+        if (!action) return;
+
+        if (action.type === 'PEER_JOINED') {
+          // If a new peer joined and we are host, send current state immediately
+          if (isHostRef.current) {
+            net.broadcastGameState(gameStateRef.current);
+          }
+          // Also announce our own presence
+          if (myPlayerRef.current) {
+            net.broadcastAction({
+              type: 'JOIN_PLAYER',
+              player: myPlayerRef.current
+            });
+          }
+        }
+        else if (action.type === 'PRESENCE_HEARTBEAT' && action.player) {
+          applyAction({ type: 'JOIN_PLAYER', player: action.player });
+        }
+        else {
+          applyAction(action);
+        }
+      },
+      onPeerListChange: (peers) => {
+        setConnectedPeersCount(peers.length);
       }
     });
 
     networkRef.current = net;
 
-    // Track peer counts periodically
-    const peerTimer = setInterval(() => {
-      if (net && net.clientConnections) {
-        setConnectedPeersCount(net.clientConnections.size);
+    // Periodic heartbeat: announce player & broadcast state if host
+    const heartbeatTimer = setInterval(() => {
+      if (myPlayerRef.current) {
+        net.broadcastPresence(myPlayerRef.current);
       }
-    }, 1500);
+      if (isHostRef.current) {
+        net.broadcastGameState(gameStateRef.current);
+      }
+    }, 2000);
+
+    // Initial broadcast of presence if player already exists
+    if (myPlayerRef.current) {
+      net.broadcastAction({
+        type: 'JOIN_PLAYER',
+        player: myPlayerRef.current
+      });
+    }
 
     return () => {
-      clearInterval(peerTimer);
+      clearInterval(heartbeatTimer);
       net.destroy();
     };
-  }, [roomCode, isHost, myPlayerId]);
+  }, [roomCode, myPlayerId, applyAction]);
 
-  // Current Player Object
-  const myPlayer = gameState.players.find(p => p.id === myPlayerId);
-
-  // User Actions
+  // Handle local user actions
   const handleJoinTeam = (name, team) => {
     sessionStorage.setItem('huddle_player_name', name);
     sessionStorage.setItem('huddle_player_team', team);
 
-    dispatchAction({
+    const player = {
+      id: myPlayerId,
+      name,
+      team,
+      isHost,
+      isBot: false,
+    };
+
+    // Optimistically update local state immediately
+    setMyPlayer(player);
+
+    dispatch({
       type: 'JOIN_PLAYER',
-      player: {
-        id: myPlayerId,
-        name,
-        team,
-        isHost,
-        isBot: false,
-      }
+      player,
     });
+  };
+
+  const handleClaimHost = () => {
+    setIsHost(true);
+    sessionStorage.setItem('huddle_is_creator_' + roomCode, 'true');
+    if (myPlayer) {
+      const updated = { ...myPlayer, isHost: true };
+      setMyPlayer(updated);
+      dispatch({ type: 'JOIN_PLAYER', player: updated });
+    }
+    // Broadcast state to take over host responsibilities
+    broadcastState(gameStateRef.current);
   };
 
   const handleUpdateSettings = (newSettings) => {
-    dispatchAction({
-      type: 'UPDATE_SETTINGS',
-      settings: newSettings,
-    });
+    dispatch({ type: 'UPDATE_SETTINGS', settings: newSettings });
   };
 
   const handleAddBot = (team) => {
-    dispatchAction({
-      type: 'ADD_BOT',
-      team,
-    });
+    dispatch({ type: 'ADD_BOT', team });
   };
 
   const handleStartGame = () => {
-    dispatchAction({ type: 'START_GAME' });
+    dispatch({ type: 'START_GAME' });
   };
 
   const handleSelectMove = (move) => {
-    dispatchAction({
+    dispatch({
       type: 'SELECT_MOVE',
       playerId: myPlayerId,
       move,
@@ -363,30 +416,27 @@ export default function App() {
   };
 
   const handleForceShuffle = () => {
-    dispatchAction({ type: 'FORCE_SHUFFLE' });
+    dispatch({ type: 'FORCE_SHUFFLE' });
   };
 
   const handleMatchupResult = (result) => {
-    dispatchAction({
-      type: 'MATCHUP_RESULT',
-      result,
-    });
+    dispatch({ type: 'MATCHUP_RESULT', result });
   };
 
   const handleNextMatchup = () => {
-    dispatchAction({ type: 'NEXT_MATCHUP' });
+    dispatch({ type: 'NEXT_MATCHUP' });
   };
 
-  const handleEndGame = () => {
-    dispatchAction({ type: 'END_GAME' });
+  const handleEndGame = (winner) => {
+    dispatch({ type: 'END_GAME', winner });
   };
 
   const handleRematch = () => {
-    dispatchAction({ type: 'REMATCH' });
+    dispatch({ type: 'REMATCH' });
   };
 
   const handleBackToLobby = () => {
-    dispatchAction({ type: 'BACK_TO_LOBBY' });
+    dispatch({ type: 'BACK_TO_LOBBY' });
   };
 
   return (
@@ -397,6 +447,25 @@ export default function App() {
         connectedPeersCount={connectedPeersCount}
         onOpenQr={() => setShowQr(true)}
       />
+
+      {/* Host Claim Banner if user is not currently marked as host */}
+      {!isHost && (
+        <div style={{ textAlign: 'right', marginBottom: '8px' }}>
+          <button
+            onClick={handleClaimHost}
+            style={{
+              background: 'none',
+              border: 'none',
+              color: 'var(--text-dim)',
+              fontSize: '0.75rem',
+              cursor: 'pointer',
+              textDecoration: 'underline'
+            }}
+          >
+            Claim Host Controls
+          </button>
+        </div>
+      )}
 
       <main className="main-stage">
         {gameState.phase === 'lobby' && (

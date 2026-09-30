@@ -1,188 +1,156 @@
-import Peer from 'peerjs';
+import { joinRoom } from '@trystero-p2p/torrent';
 
 export class RoomNetwork {
-  constructor({ roomCode, isHost, onStateReceived, onPlayerJoined, onPlayerLeft, onConnected, onError }) {
+  constructor({ roomCode, myPlayerId, onStateReceived, onActionReceived, onPeerListChange }) {
     this.roomCode = roomCode.toUpperCase().trim();
-    this.isHost = isHost;
+    this.myPlayerId = myPlayerId;
     this.onStateReceived = onStateReceived;
-    this.onPlayerJoined = onPlayerJoined;
-    this.onPlayerLeft = onPlayerLeft;
-    this.onConnected = onConnected;
-    this.onError = onError;
+    this.onActionReceived = onActionReceived;
+    this.onPeerListChange = onPeerListChange;
 
-    this.peer = null;
-    this.hostConnection = null; // Used by clients to communicate with host
-    this.clientConnections = new Map(); // Used by host to communicate with clients
+    this.room = null;
+    this.sendStateAction = null;
+    this.sendPlayerAction = null;
+    this.sendPresenceAction = null;
     this.broadcastChannel = null;
+    this.connectedPeers = new Set();
 
     this.init();
   }
 
-  getPeerIdForRoom(code) {
-    // Sanitize room code to be safe for PeerJS ID
-    const sanitized = code.toLowerCase().replace(/[^a-z0-9]/g, '');
-    return `huddle-psr-${sanitized}`;
-  }
-
   init() {
-    // Set up local BroadcastChannel for zero-latency multi-tab sync on same machine
+    // 1. Same-device instant tab synchronization via BroadcastChannel
     try {
       if (typeof window !== 'undefined' && window.BroadcastChannel) {
-        this.broadcastChannel = new BroadcastChannel(`huddle-channel-${this.roomCode}`);
+        this.broadcastChannel = new BroadcastChannel(`huddle-sync-${this.roomCode}`);
         this.broadcastChannel.onmessage = (event) => {
-          this.handleIncomingMessage(event.data, 'local-tab');
+          this.handleChannelMessage(event.data);
         };
       }
-    } catch {
-      // BroadcastChannel optional fallback
-    }
-
-    // Set up PeerJS for cross-device networking
-    try {
-      const peerOptions = {
-        debug: 1,
-        config: {
-          iceServers: [
-            { urls: 'stun:stun.l.google.com:19302' },
-            { urls: 'stun:global.stun.twilio.com:3478' }
-          ]
-        }
-      };
-
-      if (this.isHost) {
-        const hostPeerId = this.getPeerIdForRoom(this.roomCode);
-        this.peer = new Peer(hostPeerId, peerOptions);
-
-        this.peer.on('open', (id) => {
-          if (this.onConnected) this.onConnected(id);
-        });
-
-        this.peer.on('connection', (conn) => {
-          this.clientConnections.set(conn.peer, conn);
-
-          conn.on('data', (data) => {
-            this.handleIncomingMessage(data, conn.peer);
-          });
-
-          conn.on('close', () => {
-            this.clientConnections.delete(conn.peer);
-            if (this.onPlayerLeft) this.onPlayerLeft(conn.peer);
-          });
-
-          conn.on('error', (err) => {
-            console.warn('Connection error from client', err);
-          });
-        });
-
-        this.peer.on('error', (err) => {
-          console.warn('Host peer error:', err);
-          // If peer ID is taken, we might already have a host in another tab or retry
-          if (err.type === 'unavailable-id') {
-            if (this.onError) this.onError('Room ID already in use. Try a different room code.');
-          } else if (this.onError) {
-            this.onError(err.message || 'Network error');
-          }
-        });
-
-      } else {
-        // Client connects to host peer ID
-        this.peer = new Peer(peerOptions);
-
-        this.peer.on('open', () => {
-          const hostPeerId = this.getPeerIdForRoom(this.roomCode);
-          const conn = this.peer.connect(hostPeerId, { reliable: true });
-
-          this.hostConnection = conn;
-
-          conn.on('open', () => {
-            if (this.onConnected) this.onConnected(conn.peer);
-          });
-
-          conn.on('data', (data) => {
-            this.handleIncomingMessage(data, 'host');
-          });
-
-          conn.on('close', () => {
-            if (this.onError) this.onError('Disconnected from host.');
-          });
-
-          conn.on('error', (err) => {
-            console.warn('Host connection error:', err);
-            if (this.onError) this.onError('Failed to connect to host. Make sure the room code is correct.');
-          });
-        });
-
-        this.peer.on('error', (err) => {
-          console.warn('Client peer error:', err);
-          if (this.onError) this.onError(err.message || 'Network error connecting');
-        });
-      }
     } catch (e) {
-      console.warn('PeerJS init failed:', e);
+      console.warn('BroadcastChannel error:', e);
     }
-  }
 
-  handleIncomingMessage(msg, senderId) {
-    if (!msg || typeof msg !== 'object') return;
+    // 2. Cross-device WebRTC mesh via Trystero BitTorrent swarm
+    try {
+      const config = { appId: 'huddle-clash-v1' };
+      this.room = joinRoom(config, this.roomCode);
 
-    if (msg.type === 'SYNC_STATE') {
-      // Received updated state from host
-      if (!this.isHost && this.onStateReceived) {
-        this.onStateReceived(msg.payload);
-      }
-    } else if (msg.type === 'ACTION') {
-      // Host receives action from client
-      if (this.isHost && this.onPlayerJoined) {
-        this.onPlayerJoined(msg.action, senderId);
-      }
-    }
-  }
+      // Register Trystero action handlers
+      const [sendState, getState] = this.room.makeAction('gameState');
+      const [sendAction, getAction] = this.room.makeAction('playerAction');
+      const [sendPresence, getPresence] = this.room.makeAction('presence');
 
-  // Host broadcasts state to all connected peers & local tabs
-  broadcastState(state) {
-    const message = { type: 'SYNC_STATE', payload: state };
+      this.sendStateAction = sendState;
+      this.sendPlayerAction = sendAction;
+      this.sendPresenceAction = sendPresence;
 
-    // 1. Broadcast to all WebRTC client connections
-    this.clientConnections.forEach((conn) => {
-      if (conn.open) {
-        try {
-          conn.send(message);
-        } catch (e) {
-          console.warn('Failed to send to client', e);
+      // Handle remote state updates
+      getState((data, peerId) => {
+        if (this.onStateReceived) this.onStateReceived(data, peerId);
+      });
+
+      // Handle remote actions (joins, moves, settings updates)
+      getAction((action, peerId) => {
+        if (this.onActionReceived) this.onActionReceived(action, peerId);
+      });
+
+      // Handle presence heartbeats
+      getPresence((presenceData, peerId) => {
+        if (this.onActionReceived) {
+          this.onActionReceived({ type: 'PRESENCE_HEARTBEAT', player: presenceData }, peerId);
         }
-      }
-    });
+      });
 
-    // 2. Broadcast to local tabs via BroadcastChannel
+      // Peer connected
+      this.room.onPeerJoin((peerId) => {
+        this.connectedPeers.add(peerId);
+        if (this.onPeerListChange) this.onPeerListChange(Array.from(this.connectedPeers));
+        if (this.onActionReceived) {
+          this.onActionReceived({ type: 'PEER_JOINED', peerId });
+        }
+      });
+
+      // Peer disconnected
+      this.room.onPeerLeave((peerId) => {
+        this.connectedPeers.delete(peerId);
+        if (this.onPeerListChange) this.onPeerListChange(Array.from(this.connectedPeers));
+        if (this.onActionReceived) {
+          this.onActionReceived({ type: 'PEER_LEFT', peerId });
+        }
+      });
+    } catch (err) {
+      console.warn('Trystero init error:', err);
+    }
+  }
+
+  handleChannelMessage(msg) {
+    if (!msg || typeof msg !== 'object') return;
+    if (msg.senderId === this.myPlayerId) return; // Don't handle self-echo
+
+    if (msg.type === 'SYNC_GAME_STATE' && this.onStateReceived) {
+      this.onStateReceived(msg.payload, msg.senderId);
+    } else if (msg.type === 'CLIENT_ACTION' && this.onActionReceived) {
+      this.onActionReceived(msg.action, msg.senderId);
+    }
+  }
+
+  // Host broadcasts authoritative state to all peers
+  broadcastGameState(state) {
+    // 1. Send across local browser tabs
     if (this.broadcastChannel) {
       try {
-        this.broadcastChannel.postMessage(message);
-      } catch {
-        // ignore
+        this.broadcastChannel.postMessage({
+          type: 'SYNC_GAME_STATE',
+          payload: state,
+          senderId: this.myPlayerId
+        });
+      } catch (e) {
+        console.warn('Channel error:', e);
+      }
+    }
+
+    // 2. Send across Trystero P2P network
+    if (this.sendStateAction) {
+      try {
+        this.sendStateAction(state);
+      } catch (e) {
+        console.warn('Trystero sendState error:', e);
       }
     }
   }
 
-  // Client sends an action to host
-  sendActionToHost(action) {
-    const message = { type: 'ACTION', action };
-
-    // Send via WebRTC if open
-    if (this.hostConnection && this.hostConnection.open) {
+  // Send player action to host and peers
+  broadcastAction(action) {
+    // 1. Send across local tabs
+    if (this.broadcastChannel) {
       try {
-        this.hostConnection.send(message);
+        this.broadcastChannel.postMessage({
+          type: 'CLIENT_ACTION',
+          action,
+          senderId: this.myPlayerId
+        });
       } catch (e) {
-        console.warn('Failed to send to host via P2P', e);
+        console.warn('Channel error:', e);
       }
     }
 
-    // Also broadcast on local channel for instant multi-tab response
-    if (this.broadcastChannel) {
+    // 2. Send across Trystero P2P
+    if (this.sendPlayerAction) {
       try {
-        this.broadcastChannel.postMessage(message);
-      } catch {
-        // ignore
+        this.sendPlayerAction(action);
+      } catch (e) {
+        console.warn('Trystero sendAction error:', e);
       }
+    }
+  }
+
+  // Send periodic presence
+  broadcastPresence(player) {
+    if (this.sendPresenceAction && player) {
+      try {
+        this.sendPresenceAction(player);
+      } catch {}
     }
   }
 
@@ -192,20 +160,9 @@ export class RoomNetwork {
         this.broadcastChannel.close();
       } catch {}
     }
-    if (this.hostConnection) {
+    if (this.room) {
       try {
-        this.hostConnection.close();
-      } catch {}
-    }
-    this.clientConnections.forEach(conn => {
-      try {
-        conn.close();
-      } catch {}
-    });
-    this.clientConnections.clear();
-    if (this.peer) {
-      try {
-        this.peer.destroy();
+        this.room.leave();
       } catch {}
     }
   }

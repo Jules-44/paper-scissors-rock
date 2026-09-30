@@ -15,6 +15,7 @@ export function ShowdownPhase({
   isHost,
   onMatchupResult,
   onNextMatchup,
+  onTieReplay,
   onEndGame
 }) {
   const game = GAMES[gameId] || GAMES.psr;
@@ -221,7 +222,16 @@ export function ShowdownPhase({
       {/* NEXT MATCHUP / PROCEED CONTROLS */}
       {animStage === 'revealed' && isHost && (
         <div style={{ display: 'flex', gap: '14px', marginTop: '10px' }}>
-          {clinchedWinner ? (
+          {result === 'draw' ? (
+            <button 
+              className="btn-primary" 
+              onClick={onTieReplay} 
+              style={{ padding: '14px 28px', background: 'linear-gradient(135deg, #f59e0b 0%, #d97706 100%)' }}
+            >
+              <RefreshCw size={18} />
+              <span>Sudden Death Re-Match! (Pick Again) 🔄</span>
+            </button>
+          ) : clinchedWinner ? (
             <button 
               className="btn-primary" 
               onClick={() => onEndGame(clinchedWinner)} 
@@ -230,15 +240,10 @@ export function ShowdownPhase({
               <Trophy size={18} />
               <span>Claim Huddle Victory for {clinchedWinner === 'teamA' ? settings.teamAName : settings.teamBName}! 👑</span>
             </button>
-          ) : currentMatchupIndex + 1 < matchups.length ? (
-            <button className="btn-primary" onClick={onNextMatchup} style={{ padding: '14px 28px' }}>
-              <span>Next Matchup ({matchups[currentMatchupIndex + 1]?.playerAName} vs {matchups[currentMatchupIndex + 1]?.playerBName})</span>
-              <ArrowRight size={18} />
-            </button>
           ) : (
-            <button className="btn-primary" onClick={() => onEndGame()} style={{ padding: '14px 28px' }}>
-              <Trophy size={18} />
-              <span>Declare Huddle Victor!</span>
+            <button className="btn-primary" onClick={onNextMatchup} style={{ padding: '14px 28px' }}>
+              <span>Next Duel: Pick New Weapons!</span>
+              <ArrowRight size={18} />
             </button>
           )}
         </div>
@@ -246,7 +251,9 @@ export function ShowdownPhase({
 
       {animStage === 'revealed' && !isHost && (
         <p style={{ color: 'var(--text-dim)', fontSize: '0.85rem', marginTop: '14px' }}>
-          {clinchedWinner 
+          {result === 'draw'
+            ? 'Tie game! Waiting for host to start sudden death re-pick...'
+            : clinchedWinner 
             ? `${clinchedWinner === 'teamA' ? settings.teamAName : settings.teamBName} clinched the victory! Waiting for host...` 
             : 'Waiting for host to proceed to next duel...'}
         </p>

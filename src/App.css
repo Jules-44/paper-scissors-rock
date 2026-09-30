@@ -958,3 +958,85 @@
   display: inline-block;
   margin: 20px 0;
 }
+
+/* Round Duel & Spectator Styles */
+.duel-banner {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 8px 18px;
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: var(--radius-full);
+  margin-bottom: 20px;
+  font-weight: 700;
+  font-size: 0.9rem;
+}
+
+.tie-alert {
+  background: rgba(234, 179, 8, 0.15);
+  border: 1px solid var(--warning);
+  color: var(--warning);
+  padding: 10px 20px;
+  border-radius: var(--radius-md);
+  font-weight: 800;
+  font-size: 0.95rem;
+  margin-bottom: 20px;
+  text-align: center;
+  animation: pulseGlow 1.5s infinite ease-in-out;
+}
+
+.spectator-box {
+  padding: 32px 24px;
+  text-align: center;
+  max-width: 600px;
+  width: 100%;
+  margin: 0 auto;
+}
+
+.spectator-gladiators {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 20px;
+  margin: 20px 0;
+}
+
+.spectator-card {
+  padding: 16px 20px;
+  border-radius: var(--radius-md);
+  background: rgba(255, 255, 255, 0.05);
+  min-width: 140px;
+}
+
+.spectator-card.team-a {
+  border: 1px solid var(--team-a-border);
+  color: var(--team-a);
+}
+
+.spectator-card.team-b {
+  border: 1px solid var(--team-b-border);
+  color: var(--team-b);
+}
+
+.cheer-buttons {
+  display: flex;
+  justify-content: center;
+  gap: 12px;
+  margin-top: 18px;
+}
+
+.btn-cheer {
+  font-size: 1.5rem;
+  padding: 8px 14px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-full);
+  transition: transform 0.15s ease;
+}
+
+.btn-cheer:hover {
+  transform: scale(1.2);
+  background: rgba(255, 255, 255, 0.15);
+}
+

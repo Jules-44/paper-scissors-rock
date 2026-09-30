@@ -149,6 +149,7 @@ export default function App() {
 
         next.phase = 'picking';
         next.moves = {};
+        next.isTieReplay = false;
         next.matchups = queue;
         next.currentMatchupIndex = 0;
         next.scores = { teamA: 0, teamB: 0 };
@@ -156,29 +157,67 @@ export default function App() {
         next.winnerTeam = null;
         next.clinchedWinner = null;
 
-        // Auto-assign moves for bots
+        // Auto-assign move for bot if fighting in first duel
         const game = GAMES[next.settings.gameId] || GAMES.psr;
-        next.players.forEach(p => {
-          if (p.isBot) {
-            const randomChoice = game.choices[Math.floor(Math.random() * game.choices.length)];
-            next.moves[p.id] = randomChoice.id;
+        const currentMatch = queue[0];
+        if (currentMatch) {
+          const fA = next.players.find(p => p.id === currentMatch.playerAId);
+          const fB = next.players.find(p => p.id === currentMatch.playerBId);
+          if (fA && fA.isBot) {
+            next.moves[fA.id] = game.choices[Math.floor(Math.random() * game.choices.length)].id;
           }
-        });
+          if (fB && fB.isBot) {
+            next.moves[fB.id] = game.choices[Math.floor(Math.random() * game.choices.length)].id;
+          }
+        }
       }
       else if (action.type === 'SELECT_MOVE') {
         next.moves = { ...next.moves, [action.playerId]: action.move };
+
+        // Auto advance to clash if both active duelists have locked in
+        const currentMatch = next.matchups[next.currentMatchupIndex];
+        if (currentMatch && next.phase === 'picking') {
+          const moveA = next.moves[currentMatch.playerAId];
+          const moveB = next.moves[currentMatch.playerBId];
+          if (moveA && moveB) {
+            next.phase = 'shuffle';
+          }
+        }
       }
       else if (action.type === 'FORCE_SHUFFLE') {
         const game = GAMES[next.settings.gameId] || GAMES.psr;
+        const currentMatch = next.matchups[next.currentMatchupIndex];
         const updatedMoves = { ...next.moves };
-        next.players.forEach(p => {
-          if (!updatedMoves[p.id]) {
-            const randomChoice = game.choices[Math.floor(Math.random() * game.choices.length)];
-            updatedMoves[p.id] = randomChoice.id;
+        if (currentMatch) {
+          if (!updatedMoves[currentMatch.playerAId]) {
+            updatedMoves[currentMatch.playerAId] = game.choices[Math.floor(Math.random() * game.choices.length)].id;
           }
-        });
+          if (!updatedMoves[currentMatch.playerBId]) {
+            updatedMoves[currentMatch.playerBId] = game.choices[Math.floor(Math.random() * game.choices.length)].id;
+          }
+        }
         next.moves = updatedMoves;
         next.phase = 'shuffle';
+      }
+      else if (action.type === 'TIE_REPLAY') {
+        // Clear previous moves so players get to pick fresh!
+        next.moves = {};
+        next.isTieReplay = true;
+        next.phase = 'picking';
+
+        // Auto-assign move for bot if fighting
+        const game = GAMES[next.settings.gameId] || GAMES.psr;
+        const currentMatch = next.matchups[next.currentMatchupIndex];
+        if (currentMatch) {
+          const fA = next.players.find(p => p.id === currentMatch.playerAId);
+          const fB = next.players.find(p => p.id === currentMatch.playerBId);
+          if (fA && fA.isBot) {
+            next.moves[fA.id] = game.choices[Math.floor(Math.random() * game.choices.length)].id;
+          }
+          if (fB && fB.isBot) {
+            next.moves[fB.id] = game.choices[Math.floor(Math.random() * game.choices.length)].id;
+          }
+        }
       }
       else if (action.type === 'MATCHUP_RESULT') {
         const result = action.result; // 'teamA' | 'teamB' | 'draw'
@@ -214,6 +253,9 @@ export default function App() {
       }
       else if (action.type === 'NEXT_MATCHUP') {
         next.clinchedWinner = null;
+        next.isTieReplay = false;
+        next.moves = {}; // RESET MOVES FOR NEW DUEL!
+
         const nextIdx = next.currentMatchupIndex + 1;
         if (nextIdx < next.matchups.length) {
           next.currentMatchupIndex = nextIdx;
@@ -229,6 +271,22 @@ export default function App() {
           };
           next.matchups = [...next.matchups, extraMatchup];
           next.currentMatchupIndex = nextIdx;
+        }
+
+        next.phase = 'picking'; // RETURN TO PICKING PHASE FOR NEW DUEL!
+
+        // Auto-assign move for bot if fighting in new duel
+        const game = GAMES[next.settings.gameId] || GAMES.psr;
+        const currentMatch = next.matchups[next.currentMatchupIndex];
+        if (currentMatch) {
+          const fA = next.players.find(p => p.id === currentMatch.playerAId);
+          const fB = next.players.find(p => p.id === currentMatch.playerBId);
+          if (fA && fA.isBot) {
+            next.moves[fA.id] = game.choices[Math.floor(Math.random() * game.choices.length)].id;
+          }
+          if (fB && fB.isBot) {
+            next.moves[fB.id] = game.choices[Math.floor(Math.random() * game.choices.length)].id;
+          }
         }
       }
       else if (action.type === 'END_GAME') {
@@ -427,6 +485,10 @@ export default function App() {
     dispatch({ type: 'NEXT_MATCHUP' });
   };
 
+  const handleTieReplay = () => {
+    dispatch({ type: 'TIE_REPLAY' });
+  };
+
   const handleEndGame = (winner) => {
     dispatch({ type: 'END_GAME', winner });
   };
@@ -485,8 +547,13 @@ export default function App() {
           <PickingPhase
             gameId={gameState.settings.gameId}
             myPlayer={myPlayer}
-            players={gameState.players}
+            currentMatchup={gameState.matchups[gameState.currentMatchupIndex]}
+            currentMatchupIndex={gameState.currentMatchupIndex}
+            totalMatchups={gameState.matchups.length}
+            isTieReplay={gameState.isTieReplay}
             moves={gameState.moves}
+            scores={gameState.scores}
+            settings={gameState.settings}
             onSelectMove={handleSelectMove}
             isHost={isHost}
             onForceShuffle={handleForceShuffle}
@@ -506,6 +573,7 @@ export default function App() {
             isHost={isHost}
             onMatchupResult={handleMatchupResult}
             onNextMatchup={handleNextMatchup}
+            onTieReplay={handleTieReplay}
             onEndGame={handleEndGame}
           />
         )}

@@ -77,22 +77,38 @@ export default function App() {
   const [connectedPeersCount, setConnectedPeersCount] = useState(0);
 
   // Authoritative Game State
-  const [gameState, setGameState] = useState({
-    phase: 'lobby', // 'lobby' | 'picking' | 'shuffle' | 'victory'
-    settings: {
-      gameId: 'psr',
-      winConditionId: 'best_of_3',
-      teamAName: 'Team A',
-      teamBName: 'Team B',
-    },
-    players: [],
-    moves: {},
-    scores: { teamA: 0, teamB: 0 },
-    matchups: [],
-    currentMatchupIndex: 0,
-    history: [],
-    winnerTeam: null,
-    clinchedWinner: null,
+  const [gameState, setGameState] = useState(() => {
+    let initialPlayers = [];
+    if (typeof window !== 'undefined') {
+      const storedName = sessionStorage.getItem('huddle_player_name');
+      const storedTeam = sessionStorage.getItem('huddle_player_team');
+      if (storedName) {
+        initialPlayers.push({
+          id: myPlayerId,
+          name: storedName,
+          team: storedTeam || 'teamA',
+          isHost,
+          isBot: false,
+        });
+      }
+    }
+    return {
+      phase: 'lobby', // 'lobby' | 'picking' | 'shuffle' | 'victory'
+      settings: {
+        gameId: 'psr',
+        winConditionId: 'best_of_3',
+        teamAName: 'Team A',
+        teamBName: 'Team B',
+      },
+      players: initialPlayers,
+      moves: {},
+      scores: { teamA: 0, teamB: 0 },
+      matchups: [],
+      currentMatchupIndex: 0,
+      history: [],
+      winnerTeam: null,
+      clinchedWinner: null,
+    };
   });
 
   const networkRef = useRef(null);
@@ -105,12 +121,12 @@ export default function App() {
   const myPlayerRef = useRef(myPlayer);
   myPlayerRef.current = myPlayer;
 
-  // Broadcast latest state to peers (host only)
-  const broadcastState = useCallback((stateToBroadcast) => {
-    if (networkRef.current && isHostRef.current) {
-      networkRef.current.broadcastGameState(stateToBroadcast);
+  // Broadcast latest state to peers whenever gameState updates (host only)
+  useEffect(() => {
+    if (isHost && networkRef.current) {
+      networkRef.current.broadcastGameState(gameState);
     }
-  }, []);
+  }, [gameState, isHost]);
 
   // Central state reducer for all game actions
   const applyAction = useCallback((action) => {
@@ -332,14 +348,9 @@ export default function App() {
         next.clinchedWinner = null;
       }
 
-      // If we are host, broadcast updated state to network
-      if (isHostRef.current) {
-        broadcastState(next);
-      }
-
       return next;
     });
-  }, [broadcastState]);
+  }, []);
 
   // Dispatch an action (applies locally & broadcasts to network)
   const dispatch = useCallback((action) => {
@@ -362,7 +373,23 @@ export default function App() {
       onStateReceived: (remoteState) => {
         // If we receive state from a host, adopt it
         if (!isHostRef.current && remoteState) {
-          setGameState(remoteState);
+          setGameState((prev) => {
+            let mergedPlayers = remoteState.players || [];
+            if (myPlayerRef.current) {
+              const exists = mergedPlayers.some(p => p.id === myPlayerRef.current.id);
+              if (!exists) {
+                mergedPlayers = [...mergedPlayers, myPlayerRef.current];
+                net.broadcastAction({
+                  type: 'JOIN_PLAYER',
+                  player: myPlayerRef.current
+                });
+              }
+            }
+            return {
+              ...remoteState,
+              players: mergedPlayers
+            };
+          });
         }
       },
       onActionReceived: (action) => {
@@ -450,7 +477,7 @@ export default function App() {
       dispatch({ type: 'JOIN_PLAYER', player: updated });
     }
     // Broadcast state to take over host responsibilities
-    broadcastState(gameStateRef.current);
+    networkRef.current?.broadcastGameState(gameStateRef.current);
   };
 
   const handleUpdateSettings = (newSettings) => {

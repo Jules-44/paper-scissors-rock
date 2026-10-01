@@ -1,4 +1,4 @@
-import { joinRoom } from '@trystero-p2p/torrent';
+import { joinRoom } from 'trystero/nostr';
 
 export class RoomNetwork {
   constructor({ roomCode, myPlayerId, onStateReceived, onActionReceived, onPeerListChange }) {
@@ -9,9 +9,9 @@ export class RoomNetwork {
     this.onPeerListChange = onPeerListChange;
 
     this.room = null;
-    this.sendStateAction = null;
-    this.sendPlayerAction = null;
-    this.sendPresenceAction = null;
+    this.stateAction = null;
+    this.playerAction = null;
+    this.presenceAction = null;
     this.broadcastChannel = null;
     this.connectedPeers = new Set();
 
@@ -28,59 +28,63 @@ export class RoomNetwork {
         };
       }
     } catch (e) {
-      console.warn('BroadcastChannel error:', e);
+      console.warn('[Network] BroadcastChannel error:', e);
     }
 
-    // 2. Cross-device WebRTC mesh via Trystero BitTorrent swarm
+    // 2. Cross-device WebRTC mesh via Trystero Nostr network
     try {
-      const config = { appId: 'huddle-clash-v1' };
+      const config = {
+        appId: 'huddle-clash-v1'
+      };
+
       this.room = joinRoom(config, this.roomCode);
 
-      // Register Trystero action handlers
-      const [sendState, getState] = this.room.makeAction('gameState');
-      const [sendAction, getAction] = this.room.makeAction('playerAction');
-      const [sendPresence, getPresence] = this.room.makeAction('presence');
-
-      this.sendStateAction = sendState;
-      this.sendPlayerAction = sendAction;
-      this.sendPresenceAction = sendPresence;
+      // Register Trystero action handlers (Trystero 0.25+ returns action object with .send and .onMessage)
+      this.stateAction = this.room.makeAction('gameState');
+      this.playerAction = this.room.makeAction('playerAction');
+      this.presenceAction = this.room.makeAction('presence');
 
       // Handle remote state updates
-      getState((data, peerId) => {
+      this.stateAction.onMessage = (data, meta) => {
+        const peerId = (meta && typeof meta === 'object') ? meta.peerId : meta;
         if (this.onStateReceived) this.onStateReceived(data, peerId);
-      });
+      };
 
       // Handle remote actions (joins, moves, settings updates)
-      getAction((action, peerId) => {
+      this.playerAction.onMessage = (action, meta) => {
+        const peerId = (meta && typeof meta === 'object') ? meta.peerId : meta;
         if (this.onActionReceived) this.onActionReceived(action, peerId);
-      });
+      };
 
       // Handle presence heartbeats
-      getPresence((presenceData, peerId) => {
+      this.presenceAction.onMessage = (presenceData, meta) => {
+        const peerId = (meta && typeof meta === 'object') ? meta.peerId : meta;
         if (this.onActionReceived) {
           this.onActionReceived({ type: 'PRESENCE_HEARTBEAT', player: presenceData }, peerId);
         }
-      });
+      };
 
-      // Peer connected
-      this.room.onPeerJoin((peerId) => {
+      // Peer connected (onPeerJoin is a property setter in Trystero 0.25+)
+      this.room.onPeerJoin = (peerId) => {
+        console.log(`[P2P] Remote peer joined room ${this.roomCode}:`, peerId);
         this.connectedPeers.add(peerId);
         if (this.onPeerListChange) this.onPeerListChange(Array.from(this.connectedPeers));
         if (this.onActionReceived) {
           this.onActionReceived({ type: 'PEER_JOINED', peerId });
         }
-      });
+      };
 
       // Peer disconnected
-      this.room.onPeerLeave((peerId) => {
+      this.room.onPeerLeave = (peerId) => {
+        console.log(`[P2P] Remote peer left room ${this.roomCode}:`, peerId);
         this.connectedPeers.delete(peerId);
         if (this.onPeerListChange) this.onPeerListChange(Array.from(this.connectedPeers));
         if (this.onActionReceived) {
           this.onActionReceived({ type: 'PEER_LEFT', peerId });
         }
-      });
+      };
     } catch (err) {
-      console.warn('Trystero init error:', err);
+      console.error('[Network] Trystero P2P initialization error:', err);
     }
   }
 
@@ -106,16 +110,18 @@ export class RoomNetwork {
           senderId: this.myPlayerId
         });
       } catch (e) {
-        console.warn('Channel error:', e);
+        console.warn('[Network] BroadcastChannel state error:', e);
       }
     }
 
     // 2. Send across Trystero P2P network
-    if (this.sendStateAction) {
+    if (this.stateAction) {
       try {
-        this.sendStateAction(state);
+        this.stateAction.send(state).catch((e) => {
+          console.warn('[Network] P2P state send warning:', e);
+        });
       } catch (e) {
-        console.warn('Trystero sendState error:', e);
+        console.warn('[Network] P2P sendState error:', e);
       }
     }
   }
@@ -131,25 +137,27 @@ export class RoomNetwork {
           senderId: this.myPlayerId
         });
       } catch (e) {
-        console.warn('Channel error:', e);
+        console.warn('[Network] BroadcastChannel action error:', e);
       }
     }
 
     // 2. Send across Trystero P2P
-    if (this.sendPlayerAction) {
+    if (this.playerAction) {
       try {
-        this.sendPlayerAction(action);
+        this.playerAction.send(action).catch((e) => {
+          console.warn('[Network] P2P action send warning:', e);
+        });
       } catch (e) {
-        console.warn('Trystero sendAction error:', e);
+        console.warn('[Network] P2P sendAction error:', e);
       }
     }
   }
 
   // Send periodic presence
   broadcastPresence(player) {
-    if (this.sendPresenceAction && player) {
+    if (this.presenceAction && player) {
       try {
-        this.sendPresenceAction(player);
+        this.presenceAction.send(player).catch(() => {});
       } catch {}
     }
   }
